@@ -2,7 +2,12 @@
     "preset": "base",
     "ignore": {
         "words": [
-            "php"
+            "cldr",
+            "intl",
+            "lossy",
+            "namespaces",
+            "php",
+            "ucfirst"
         ]
     }
 }

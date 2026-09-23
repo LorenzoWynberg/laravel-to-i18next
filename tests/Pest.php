@@ -1,4 +1,7 @@
 <?php
 
-// bootstrap your package’s service provider into a Test bench…
-uses(\Orchestra\Testbench\TestCase::class)->in('Feature');
+declare(strict_types=1);
+
+use Tests\TestCase;
+
+uses(TestCase::class)->in('Feature');

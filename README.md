@@ -1,25 +1,24 @@
 # Laravel → i18next Lang Parser
 
-This package parses your <a href="https://laravel.com/docs/12.x/localization" target="_blank" rel="noopener noreferrer">Laravel translation</a> files into <a href="https://www.i18next.com/" target="_blank" rel="noopener noreferrer">i18next</a>-compatible JSON, converting plural forms and placeholders into a format ready for dynamic translation usage in the frontend.
+This package parses your <a href="https://laravel.com/docs/localization" target="_blank" rel="noopener noreferrer">Laravel translation</a> files into <a href="https://www.i18next.com/" target="_blank" rel="noopener noreferrer">i18next</a>-compatible JSON, converting plural forms and placeholders into a format ready for dynamic translation usage in the frontend.
 
 ---
 
 ## 🎬 Features
-```
-- Reads every `lang/{locale}/*.php` file
-- Parses Laravel’s `trans_choice` plural syntax (`{0}|{1}|[2,*]`)
-- Converts `:placeholder`, `:Placeholder`, `:PLACEHOLDER` into i18next interpolations:
-    - `:foo` → `{{foo}}`
+
+- Reads every `lang/{locale}/**/*.php` file (`lang/vendor` is skipped)
+- **Plurals that match `trans_choice` exactly.** Every plural is resolved by Laravel's own `MessageSelector` for each CLDR category i18next can ask for in that locale, so `a|b`, `{0}|{1}|[2,*]`, ranges and three-form strings convert to what Laravel would print — including `_many` (French, Spanish, Italian…) and `_few` (Russian, Polish…). Anything i18next cannot express is reported, never guessed silently.
+- Converts placeholders the way Laravel matches them:
+    - `:foo` → `{{foo}}`, `:dueDate` → `{{dueDate}}`
     - `:Foo` → `{{foo, capitalize}}`
     - `:FOO` → `{{foo, uppercase}}`
-- Strips attributes from HTML tags
-- Writes to `public/locales/{locale}/*.json`
-- Generates a `public/locales/versions.json` file with:
-    - A unique hash for each locale’s translation files
-    - A `last_updated` timestamp
-    - Useful for cache invalidation and detecting translation updates
-- Artisan command: `lang:to-i18next {locale?}`
-```
+    - `10:30` and `https://…` stay literal text
+- Strips attributes from HTML tags for `<Trans>` (configurable)
+- Writes to `public/locales/{locale}/*.json` (configurable), plus `versions.json` with a content hash per locale for cache-busting
+- Optional **TypeScript declarations**, so a missing key, a key that names a subtree, or a wrong interpolation value is a compile error in the frontend
+- `--strict` for CI, `--prune` for renamed or deleted files
+
+**Requirements:** PHP 8.4, Laravel 12 or 13, and `ext-intl` (for the CLDR plural rules).
 
 ---
 
@@ -28,19 +27,44 @@ This package parses your <a href="https://laravel.com/docs/12.x/localization" ta
 ```
 composer require ozner-omali/laravel-to-i18next
 ```
+
+Optionally publish the config:
+
+```
+php artisan vendor:publish --tag=laravel-to-i18next-config
+```
+
 ---
 
 ## 🔧 Usage
-```
-1. Export all locales
-    php artisan lang:to-i18next
-2. Export a specific locale
-    php artisan lang:to-i18next es
+
+```bash
+php artisan lang:to-i18next                 # export every locale
+php artisan lang:to-i18next es              # export one locale
+php artisan lang:to-i18next --prune         # also delete JSON whose PHP source is gone
+php artisan lang:to-i18next --strict        # exit 1 if anything could not be converted exactly
+php artisan lang:to-i18next --types=resources/js/types/i18next.d.ts   # also write TypeScript types
 ```
 
 This will generate: \
 • Translation files under: /public/locales/{locale}/*.json \
 • A version tracking file under: /public/locales/versions.json
+
+`public/locales` is build output: gitignore it and run the command in your deploy script (e.g. with `--strict --prune`).
+
+### Configuration
+
+```php
+// config/laravel-to-i18next.php
+return [
+    'output_path' => public_path('locales'),
+    'strip_html_attributes' => true,
+    'types' => [
+        'path' => null,    // e.g. resource_path('js/types/i18next.d.ts')
+        'locale' => null,  // defaults to app.fallback_locale
+    ],
+];
+```
 
 ### Example versions.json file
 ```json
@@ -92,6 +116,50 @@ return [
     "address_other": "addresses"
 }
 ```
+
+### How plurals are converted
+
+i18next picks a plural form with `Intl.PluralRules`, so the set of suffixes depends on the language: English has `_one`/`_other`, French adds `_many` (for 1,000,000+), Russian has `_one`/`_few`/`_many`/`_other`. For each of those categories the package asks Laravel what `trans_choice` would print for counts in it, and emits that text. `_zero` is only emitted when Laravel prints something specific for 0 — i18next uses `_zero` for a count of 0 in every language.
+
+When a Laravel string makes a distinction i18next cannot (e.g. `[1,5] a few|[6,*] many`, where 2 and 6 are both `_other` in English), the command prints a warning naming the key and uses the text for the smallest count. `--strict` turns those warnings into a failing exit code.
+
+A string with a `|` is always treated as a plural. If you need a literal pipe, keep that string out of the exported files.
+
+---
+
+## 🟦 TypeScript
+
+Pass `--types=<path>` (or set `types.path`) to write a declaration of every namespace, with each value as a string literal:
+
+```ts
+// src/types/i18next.d.ts — generated
+export interface Resources {
+  "notifications": {
+    "quote_ready_for_order": "A quote is ready for order #{{orderId}}";
+  };
+  // …
+}
+```
+
+Register it once and `t()` is checked by the compiler:
+
+```ts
+import type Resources from './types/i18next';
+
+declare module 'i18next' {
+  interface CustomTypeOptions {
+    defaultNS: 'common';
+    resources: Resources;
+  }
+}
+
+t('notifications:quote_ready_for_order', { orderId });  // ✅
+t('notifications:quote_ready_for_order', { orderid });  // ❌ wrong interpolation value
+t('notifications:nope');                                // ❌ missing key
+t('validation:invalid');                                // ❌ names a subtree, not a string
+```
+
+Plural keys are addressed by their stem (`t('models:user', { count })`). i18next's types do not require `count` on a plural stem, so that one mistake still needs a runtime check.
 
 ---
 
@@ -274,21 +342,22 @@ export const initI18n = async () => {
             },
             interpolation: {
                 escapeValue: false,
-                format: (value, format) => {
-                    if (typeof value !== 'string') return value;
-                    if (format === 'capitalize') {
-                        return value.charAt(0).toUpperCase() + value.slice(1);
-                    }
-                    if (format === 'uppercase') {
-                        return value.toUpperCase();
-                    }
-                    return value;
-                },
             },
             react: {
                 useSuspense: false,
             },
         });
+
+    // i18next 26 removed `interpolation.format`; register the formatters the
+    // generated `{{x, capitalize}}` / `{{x, uppercase}}` interpolations use.
+    i18next.services.formatter?.add('capitalize', value =>
+        typeof value === 'string' ? value.charAt(0).toUpperCase() + value.slice(1) : String(value),
+    );
+    i18next.services.formatter?.add('uppercase', value =>
+        typeof value === 'string' ? value.toUpperCase() : String(value),
+    );
+
+    return i18next;
 };
 
 export default i18next;
@@ -340,42 +409,18 @@ export default function App() {
 ```
 ### 6. Basic Example Usage
 ```javascript
-// passing 2 when count is 0 or less on the model 
-// so that the pluralization in this case is correct
-// Note: could have also set up the pluralization for the resource
-// on the laravel end with {0}, {1}, [2,*]
-// then you could use the same count in the model translation
+// models.user: 'user|users'
+// messages.success.created: '{0} No :resource created.|{1} :Resource created successfully.|[2,*] Many :resource created successfully.'
 
-let count = null;
-let resource = null;
+const created = (count) =>
+    i18next.t('messages:success.created', {
+        count,
+        resource: i18next.t('models:user', { count }),
+    });
 
-// 0 items 
-count = 0;
-resource = i18next.t('models.user', {count: (count <= 0) ? 2 : count});
-i18next.t('success.created', {
-    count: count,
-    resource
-});
-// → "No users created."
-
-
-// 1 item
-count = 1
-resource = i18next.t('models.user', {count: (count <= 0) ? 2 : count});
-i18next.t('success.created', {
-    count,
-    resource
-});
-// → "User created successfully."
-
-// Multiple items
-count = 5;
-resource = i18next.t('models.user', {count: (count <= 0) ? 2 : count});
-i18next.t('success.created', {
-    count,
-    resource
-});
-// → "Many users created successfully."
+created(0); // → "No users created."
+created(1); // → "User created successfully."
+created(5); // → "Many users created successfully."
 ```
 ### 7. Trans Component Example
 #### A. Laravel translation: resources/lang/en/{file}.php
@@ -435,36 +480,29 @@ Hello <b>Ozner</b>, <br />there are none
 ---
 
 ## ✅ Notes
-```text
-The parser:
-  • Converts Laravel’s pipe plural syntax ('user|users') into _one and _other keys.
-  • Supports Laravel’s pluralization brackets ({0}, {1}, [2,*]) and converts them to *_zero, *_one, *_other.
-  • Placeholders are automatically transformed:
-     • :key → {{key}}
-     • :Key → {{key, capitalize}}
-     • :KEY → {{key, uppercase}}
-  • Strips HTML attributes from tags, e.g., <b class="highlight"> → <b>.
-  • Adds versions.json for change detection and frontend cache management.
-```
+
+- Only PHP translation files are exported. Laravel's `lang/{locale}.json` files are keyed by whole sentences, which collide with i18next's `.` and `:` separators.
+- `:KEY` in uppercase cannot reveal the original casing of a camelCase key, so it becomes `{{key, uppercase}}`; pass the lowercase name.
+- Flat keys that contain a dot (`'login.title' => …`) are kept flat; i18next still resolves them.
 
 ---
 
 ## 📖 Changelog
 <pre>
-See <a href="https://github.com/LorenzoWynberg/laravel-to-i18next-lang-parser/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer">CHANGELOG.md</a> for release notes and breaking changes.
+See <a href="https://github.com/LorenzoWynberg/laravel-to-i18next/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer">CHANGELOG.md</a> for release notes and breaking changes.
 </pre>
 
 ## 🤝 Contributing
 <pre>
 Contributions, issues, and feature requests are welcome!
 
-🔗 <a href="https://github.com/LorenzoWynberg/laravel-to-i18next-lang-parser/issues" target="_blank" rel="noopener noreferrer">Report Issues</a>
-🔗 <a href="https://github.com/LorenzoWynberg/laravel-to-i18next-lang-parser/pulls" target="_blank" rel="noopener noreferrer">Submit Pull Requests</a>
+🔗 <a href="https://github.com/LorenzoWynberg/laravel-to-i18next/issues" target="_blank" rel="noopener noreferrer">Report Issues</a>
+🔗 <a href="https://github.com/LorenzoWynberg/laravel-to-i18next/pulls" target="_blank" rel="noopener noreferrer">Submit Pull Requests</a>
 </pre>
 
 ## 🔑 License
 <pre>
-🔑 <a href="https://raw.githubusercontent.com/LorenzoWynberg/laravel-to-i18next-lang-parser/main/LICENSE.md" target="_blank" rel="noopener noreferrer">MIT License</a> © Lorenzo Wynberg / Ozner Omali
+🔑 <a href="https://raw.githubusercontent.com/LorenzoWynberg/laravel-to-i18next/main/LICENSE.md" target="_blank" rel="noopener noreferrer">MIT License</a> © Lorenzo Wynberg / Ozner Omali
 </pre>
 
 ## 🎵 Like my code? You'll love my music!
